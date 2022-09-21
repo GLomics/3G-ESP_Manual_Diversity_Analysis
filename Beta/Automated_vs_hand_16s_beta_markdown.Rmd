@@ -1,0 +1,707 @@
+---
+title: "Beta Diversity - (3G-ESP/Hand) Method Comparison - 16S and Metagenomic"
+author: "Paul Den Uyl"
+date: "2022-09-14"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## R Markdown
+
+This is an R Markdown document. Markdown is a simple formatting syntax for authoring HTML, PDF, and MS Word documents. For more details on using R Markdown see <http://rmarkdown.rstudio.com>.
+
+```{r, load dependencies}
+rm(list=ls());if(is.null(dev.list()["RStudioGD"])){} else {dev.off(dev.list()["RStudioGD"])};cat("\014")
+
+#if (!require("BiocManager", quietly = TRUE))
+#    install.packages("BiocManager")
+#BiocManager::install("phyloseq")
+#if (!requireNamespace("devtools", quietly = TRUE)){install.packages("devtools")}
+#devtools::install_github("jbisanz/qiime2R")
+library(tidyverse)
+library(phyloseq)
+library(qiime2R)
+library(vegan)
+library(ggpubr)
+library(ggrepel)
+#Set working directory to the location of this R code
+setwd(dirname(rstudioapi::getActiveDocumentContext()$path))
+```
+
+```{r, build 16S phyloseq file}
+#Calculate beta diversity for 16S sequences
+#Create phyloseq file
+#Import ASV table (non-rarefied)
+ASVtable <-read_qza("nonrarefied_table2019_16s_Feb2022_filtered.qza")
+ASVtable <- ASVtable$data
+
+#Import taxonomy file, specify taxa headers, and remove confidence values
+ASVtaxa <- read_qza("taxonomy.qza")
+
+taxtable <- ASVtaxa$data %>% separate(Taxon, sep=";",
+                                      c("Kingdom", "Phylum", "Class", "Order", "Family", "Genus", "Species"))
+taxtable$Confidence <- NULL
+
+#Read/import metadata file and convert empty cells to "NA"
+sample_info_table <- read.table("metadata_2019.tsv",  sep ='\t', header = TRUE,
+                                row.names = 1, na.strings = c("", "NA"))
+#remove everything but Lake Erie samples
+sample_info_table <- subset(sample_info_table, description == "Lake Erie sample" | description == "Lake Erie hand sample")
+
+physeq <- phyloseq(otu_table(ASVtable, taxa_are_rows= T), 
+                   tax_table(as.data.frame(taxtable) %>% column_to_rownames("Feature.ID") %>% 
+                               as.matrix()), sample_data(sample_info_table))
+```
+
+```{r Beta Diversity - all 16s pairs - prep data}
+#Prune to only direct comparison samples
+WLE_3GESP19_16S_phyloseq_pairs <- prune_samples(sample_data(physeq)$mate_label %in% c("A", "B", "C", "D", "E", "F", "G", "H", "I", "J"), physeq)
+
+### Prep data for DEICODE
+WLE_3GESP19_16S_asv_table <- as.data.frame(as(otu_table(WLE_3GESP19_16S_phyloseq_pairs),"matrix"))
+WLE_3GESP19_16S_asv_table <- tibble::rownames_to_column(WLE_3GESP19_16S_asv_table,"#OTUID")
+write.table(WLE_3GESP19_16S_asv_table, file="DEICODE/WLE_3GESP19_16S_asv_table_for_biom.txt", sep = "\t",row.names = FALSE,quote = FALSE)
+WLE_3GESP19_16S_tax_table <- as.data.frame(as(tax_table(WLE_3GESP19_16S_phyloseq_pairs),"matrix"))
+WLE_3GESP19_16S_tax_table <- tibble::rownames_to_column(WLE_3GESP19_16S_tax_table,"#OTUID")
+write.table(WLE_3GESP19_16S_tax_table,file="DEICODE/WLE_3GESP19_16S_tax_table_for_biom.txt", sep = "\t",row.names = FALSE,quote = FALSE)
+WLE_3GESP19_16S_envtsamples_metadata <- as.data.frame(as.matrix(sample_data(WLE_3GESP19_16S_phyloseq_pairs)))
+WLE_3GESP19_16S_envtsamples_metadata <- tibble::rownames_to_column(WLE_3GESP19_16S_envtsamples_metadata,"#SampleID")
+# Add metadata for filter size
+WLE_3GESP19_16S_envtsamples_metadata$filter_size = str_sub(WLE_3GESP19_16S_envtsamples_metadata$"#SampleID",-2) 
+
+# What do we want to look at in PERMANOVA and PCA?  Sampling method: Hand sampling or 3G-ESP + Filter Size: 5.0um or 0.22um
+write.table(WLE_3GESP19_16S_envtsamples_metadata, file="DEICODE/Amplicon/WLE_3GESP19_16S_sample_data_for_biom.txt" ,sep = "\t", row.names = FALSE, quote = FALSE)
+```
+```{bash run DEICODE all 16s pairs, engine.opts = '-l', eval = FALSE}
+# Install qiime2 environment
+# Sourced from https://github.com/aomlomics/tourmaline.git
+#wget https://data.qiime2.org/distro/core/qiime2-2021.2-py36-osx-conda.yml
+#conda env create -n qiime2-2021.2 --file qiime2-2021.2-py36-osx-conda.yml
+#conda activate qiime2-2021.2
+#conda install -c bioconda snakemake biopython muscle clustalo tabulate pandoc tabview
+#conda install -c conda-forge deicode
+#pip install git+https://github.com/biocore/empress.git
+#qiime dev refresh-cache
+conda activate qiime2-2021.2
+
+# Make biom file
+biom convert -i DEICODE/Amplicon/WLE_3GESP19_16S_asv_table_for_biom.txt \
+-o DEICODE/Amplicon/table_from_txt_16S_json.biom \
+--table-type="OTU table" \
+--to-json
+
+# Add metadata files to biom file
+biom add-metadata -i DEICODE/Amplicon/table_from_txt_16S_json.biom \
+-o DEICODE/Amplicon/table_w_md_16S.biom \
+--observation-metadata-fp DEICODE/Amplicon/WLE_3GESP19_16S_tax_table_for_biom.txt \
+--sample-metadata-fp DEICODE/Amplicon/WLE_3GESP19_16S_sample_data_for_biom.txt
+
+# Import into qiime2
+qiime tools import \
+--input-path DEICODE/Amplicon/table_w_md_16S.biom \
+--output-path DEICODE/Amplicon/WLE_3GESP19_16S_master.biom.qza \
+--type FeatureTable[Frequency]
+
+# Run DEICODE (default settings)
+qiime deicode rpca \
+--i-table DEICODE/Amplicon/WLE_3GESP19_16S_master.biom.qza \
+--p-n-components 3 \
+--p-min-feature-count 10 \
+--p-min-sample-count 500 \
+--o-biplot DEICODE/Amplicon/ordination_16S_all.qza \
+--o-distance-matrix DEICODE/Amplicon/distance_16S.qza
+
+# Run PERMANOVA (gets statistical significance for distances)
+qiime diversity beta-group-significance \
+--i-distance-matrix DEICODE/Amplicon/distance_16S.qza \
+--m-metadata-file DEICODE/Amplicon/WLE_3GESP19_16S_sample_data_for_biom.txt \
+--m-metadata-column sample_type \
+--p-method permanova \
+--o-visualization DEICODE/Amplicon/WLE_3GESP19_16S_PERMANOVA.qzv
+```
+```{r Beta Diversity - all 16s pairs - PERMANOVA/Plot}
+# Extract metadata
+pca_metadata <- WLE_3GESP19_16S_envtsamples_metadata
+pca_metadata %>% dplyr::rename(., "SampleID" = "#SampleID") -> pca_metadata
+
+# Load 16S data
+distance <- read_qza(file = "DEICODE/Amplicon/distance_16S.qza")
+
+# Extract distance matrix
+distance_matrix <- distance$data
+
+# Convert DEICODE matrix to "dist" class object
+PCA_dist <- as.dist(distance_matrix)
+
+# PERMANOVA for hand vs. 3G-ESP (both fractions)
+Hand_3GESP_permanova_16S <- adonis2(PCA_dist ~ description, data = pca_metadata, permutations=999) 
+Hand_3GESP_permanova_16S
+#Permutation test for adonis under reduced model
+#Terms added sequentially (first to last)
+#Permutation: free
+#Number of permutations: 999
+
+#adonis2(formula = PCA_dist ~ description, data = pca_metadata, permutations = 999)
+#Df SumOfSqs      R2      F Pr(>F)
+#description  1    1.217 0.01502 0.5796  0.559
+#Residual    38   79.805 0.98498              
+#Total       39   81.023 1.00000 
+
+# PERMANOVA for filter fraction (0.22um vs. 5um)
+Filter_Fraction_permanova_16S <- adonis2(PCA_dist ~ filter_size, data = pca_metadata, permutations=999)
+Filter_Fraction_permanova_16S
+#Permutation test for adonis under reduced model
+#Terms added sequentially (first to last)
+#Permutation: free
+#Number of permutations: 999
+#
+#adonis2(formula = PCA_dist ~ filter_size, data = pca_metadata, permutations = 999)
+#Df SumOfSqs      R2      F Pr(>F)    
+#filter_size  1   38.593 0.47633 34.565  0.001 ***
+#  Residual    38   42.429 0.52367                  
+#Total       39   81.023 1.00000
+
+# Multi-factorial PERMANOVA
+multi_permanova_16S <- adonis2(PCA_dist ~  description + filter_size, data = pca_metadata, permutations=999)
+multi_permanova_16S
+#Permutation test for adonis under reduced model
+#Terms added sequentially (first to last)
+#Permutation: free
+#Number of permutations: 999
+
+#adonis2(formula = PCA_dist ~ description + filter_size, data = pca_metadata, permutations = 999)
+#Df SumOfSqs      R2       F Pr(>F)    
+#description  1    1.217 0.01502  1.0928  0.331    
+#filter_size  1   38.593 0.47633 34.6490  0.001 ***
+#  Residual    37   41.212 0.50865                   
+#Total       39   81.023 1.00000    
+
+pco <- read_qza(file = "DEICODE/Amplicon/ordination_16S_all.qza")
+label.PC1 <- paste0("PC1 (", round(pco$data$ProportionExplained$PC1, 3)*100,"%)")
+label.PC1
+label.PC2 <- paste0("PC2 (", round(pco$data$ProportionExplained$PC2, 3)*100,"%)")
+label.PC2
+label.PC3 <- paste0("PC3 (", round(pco$data$ProportionExplained$PC3, 3)*100,"%)")
+label.PC3
+
+## Prepare PCA data for ggplot
+pca_metadata <- WLE_3GESP19_16S_envtsamples_metadata
+pca_metadata %>% dplyr::rename(., "SampleID" = "#SampleID") -> pca_metadata
+pca_metadata %>% dplyr::rename(., "Sampling Method" = "description") -> pca_metadata
+pca_metadata %>% dplyr::rename(., "Filter Fraction" = "filter_size") -> pca_metadata
+pca_data <- pco$data$Vectors
+pca_data <- right_join(pca_data,pca_metadata,on = "SampleID")
+pca_data <- subset(pca_data, !(is.na(pca_data$PC1)))
+
+Hand_ESP <- c("Lake Erie hand sample" = "#ff7f00", "Lake Erie sample" = "#1f78b4")
+Filter_size_shape <- c("22" = 21, "50" = 24)
+
+##----Make plot-----------------------------------------------------------------
+Hand_ESP_16S_PCA <- ggplot(pca_data,aes(x=PC1,y=PC2,color = `Sampling Method`, fill = `Sampling Method`, shape = `Filter Fraction`))+
+ geom_point(size = 5, stroke = 2)+
+  scale_color_manual(values = Hand_ESP, labels = c("Hand sample", "3G-ESP"))+
+  scale_fill_manual(values = Hand_ESP, labels = c("Hand sample", "3G-ESP"))+
+  scale_shape_manual(values = Filter_size_shape, labels = c("0.22µm", "5.0µm"))+
+  geom_text_repel(aes(label=mate_label), force = 18)+
+  xlab(print(label.PC1))+
+  ylab(print(label.PC2))+
+  theme(panel.background = element_rect(fill = "white",size = 1),
+        panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+        axis.title = element_text(size = 20),
+        axis.text = element_blank(),
+        axis.ticks.length=unit(0.25, "cm"),
+        axis.ticks=element_blank(),
+        plot.margin = margin(0.25, 0.25, 0.25, 0.25, "cm"),
+        axis.line.x.bottom = element_line(color = "black", size = 1),
+        axis.line.y.left = element_line(color = "black", size = 1),
+        legend.position = "bottom")+
+  ylim(min(pca_data$PC2)-abs(max(pca_data$PC2)-min(pca_data$PC2))/30,   max(pca_data$PC2)+abs(max(pca_data$PC2)-min(pca_data$PC2))/12)
+
+ggsave(Hand_ESP_16S_PCA, height = 7, width = 7, filename = "DEICODE/Amplicon/PCA_plot_16S_all.pdf", device = "pdf")
+```
+
+```{r Beta Diversity - 0.22um 16S pairs - prep data}
+#Prune to only direct comparison 0.22um samples
+WLE_3GESP19_16S_phyloseq_pairs_22 <- prune_samples(sample_data(WLE_3GESP19_16S_phyloseq_pairs)$sample_type %in% c("Archive 0.22um") | sample_data(WLE_3GESP19_16S_phyloseq_pairs)$sample_type %in% c("Hand-sample 0.22um"), WLE_3GESP19_16S_phyloseq_pairs)
+
+# Prep data for DEICODE (0.22um)
+WLE_3GESP19_16S_asv_table_22 <- as.data.frame(as(otu_table(WLE_3GESP19_16S_phyloseq_pairs_22),"matrix"))
+WLE_3GESP19_16S_asv_table_22 <- tibble::rownames_to_column(WLE_3GESP19_16S_asv_table_22,"#OTUID")
+write.table(WLE_3GESP19_16S_asv_table_22, file="DEICODE/Amplicon/WLE_3GESP19_16S_asv_table_for_biom_22.txt", sep = "\t", row.names = FALSE, quote = FALSE)
+WLE_3GESP19_16S_tax_table_22 <- as.data.frame(as(tax_table(WLE_3GESP19_16S_phyloseq_pairs_22),"matrix"))
+WLE_3GESP19_16S_tax_table_22 <- tibble::rownames_to_column(WLE_3GESP19_16S_tax_table_22,"#OTUID")
+write.table(WLE_3GESP19_16S_tax_table_22, file="DEICODE/Amplicon/WLE_3GESP19_16S_tax_table_for_biom_22.txt", sep = "\t", row.names = FALSE, quote = FALSE)
+WLE_3GESP19_16S_envtsamples_metadata_22 <- as.data.frame(as.matrix(sample_data(WLE_3GESP19_16S_phyloseq_pairs_22)))
+WLE_3GESP19_16S_envtsamples_metadata_22 <- tibble::rownames_to_column(WLE_3GESP19_16S_envtsamples_metadata_22,"#SampleID")
+# Add metadata for filter size
+WLE_3GESP19_16S_envtsamples_metadata_22$filter_size = str_sub(WLE_3GESP19_16S_envtsamples_metadata_22$"#SampleID",-2) 
+
+# What do we want to look at in PERMANOVA and PCA?  Sampling method: Hand sampling or 3G-ESP (0.22um)
+write.table(WLE_3GESP19_16S_envtsamples_metadata_22, file="DEICODE/Amplicon/WLE_3GESP19_16S_sample_data_for_biom_22.txt" ,sep = "\t", row.names = FALSE, quote = FALSE)
+```
+```{bash run DEICODE 0.22um 16S pairs, engine.opts = '-l', eval = FALSE}
+conda activate qiime2-2021.2
+
+biom convert -i DEICODE/Amplicon/WLE_3GESP19_16S_asv_table_for_biom_22.txt \
+             -o DEICODE/Amplicon/table_from_txt_json_22.biom \
+              --table-type="OTU table" --to-json
+
+# add metadata files to biom file (0.22um)
+biom add-metadata -i DEICODE/Amplicon/table_from_txt_json_22.biom \
+                  -o DEICODE/Amplicon/table_22_w_md.biom \
+                  --observation-metadata-fp DEICODE/Amplicon/WLE_3GESP19_16S_tax_table_for_biom_22.txt \
+                  --sample-metadata-fp DEICODE/Amplicon/WLE_3GESP19_16S_sample_data_for_biom_22.txt
+
+# import into qiime2 (0.22um)
+qiime tools import \
+--input-path DEICODE/Amplicon/table_22_w_md.biom \
+--output-path DEICODE/Amplicon/WLE_3GESP19_16S_22.biom.qza \
+--type FeatureTable[Frequency]
+
+# run DEICODE (default settings) (0.22um)
+qiime deicode rpca \
+--i-table DEICODE/Amplicon/WLE_3GESP19_16S_22.biom.qza \
+--p-n-components 3 \
+--p-min-feature-count 10 \
+--p-min-sample-count 500 \
+--o-biplot DEICODE/Amplicon/ordination_22.qza \
+--o-distance-matrix DEICODE/Amplicon/distance_22.qza 
+
+# Run PERMANOVA (gets statistical signficance for distances) (0.22um)
+qiime diversity beta-group-significance \
+--i-distance-matrix DEICODE/Amplicon/distance_22.qza \
+--m-metadata-file DEICODE/Amplicon/WLE_3GESP19_16S_sample_data_for_biom_22.txt \
+--m-metadata-column sample_type \
+--p-method permanova \
+--o-visualization DEICODE/Amplicon/WLE_3GESP19_16S_PERMANOVA_22.qzv 
+```
+```{r Beta Diversity - 0.22um 16S pairs - PERMANOVA/Plot}
+# Extract metadata (0.22um)
+pca_metadata_22 <- WLE_3GESP19_16S_envtsamples_metadata_22
+pca_metadata_22 %>% dplyr::rename(., "SampleID" = "#SampleID") -> pca_metadata_22
+
+## Load 16S Data (0.22um)
+distance_22 <- read_qza(file = "DEICODE/Amplicon/distance_22.qza")
+
+# Extract distance matrix (0.22um)
+distance_matrix_22 <- distance_22$data
+
+# convert DEICODE matrix to "dist" class object (0.22um)
+PCA_dist_22 <- as.dist(distance_matrix_22)
+
+# PERMANOVA for Hand vs. 3G-ESP (0.22um)
+Hand_3GESP_permanova_16S_22 <- adonis2(PCA_dist_22 ~ description, data = pca_metadata_22, permutations=999) 
+Hand_3GESP_permanova_16S_22
+#Permutation test for adonis under reduced model
+#Terms added sequentially (first to last)
+#Permutation: free
+#Number of permutations: 999
+
+#adonis2(formula = PCA_dist_22 ~ description, data = pca_metadata_22, permutations = 999)
+#Df SumOfSqs     R2      F Pr(>F)
+#description  1    0.152 0.0038 0.0686   0.86
+#Residual    18   39.959 0.9962              
+#Total       19   40.111 1.0000  
+
+pco_22 <- read_qza(file = "DEICODE/Amplicon/ordination_22.qza") 
+label.PC1_22 <- paste0("PC1 (", round(pco_22$data$ProportionExplained$PC1, 3)*100,"%)")
+label.PC1_22
+label.PC2_22 <- paste0("PC2 (", round(pco_22$data$ProportionExplained$PC2, 3)*100,"%)")
+label.PC2_22
+label.PC3_22 <- paste0("PC3 (", round(pco_22$data$ProportionExplained$PC3, 3)*100,"%)")
+label.PC3_22
+
+## Prepare PCA data for ggplot (0.22um)
+pca_metadata_22 <- WLE_3GESP19_16S_envtsamples_metadata_22
+pca_metadata_22 %>% dplyr::rename(., "SampleID" = "#SampleID") -> pca_metadata_22
+pca_metadata_22 %>% dplyr::rename(., "Sampling Method" = "description") -> pca_metadata_22
+pca_metadata_22 %>% dplyr::rename(., "Filter Fraction" = "filter_size") -> pca_metadata_22
+pca_data_22 <- pco_22$data$Vectors
+pca_data_22 <- right_join(pca_data_22,pca_metadata_22,on = "SampleID")
+pca_data_22 <- subset(pca_data_22, !(is.na(pca_data_22$PC1)))
+
+Hand_ESP_22 <- c("Lake Erie hand sample" = "#ff7f00", "Lake Erie sample" = "#1f78b4")
+Filter_size_shape <- c("22" = 21, "50" = 24)
+##----Make plot-----------------------------------------------------------------
+Hand_ESP_16S_PCA_22 <- ggplot(pca_data_22,aes(x=PC1,y=PC2, color = `Sampling Method`, fill = `Sampling Method`, shape = `Filter Fraction`))+
+  geom_point(size = 5, stroke = 2)+
+  scale_shape_manual(values = c(21), labels = c("0.22µm"))+
+  scale_color_manual(values = Hand_ESP_22, labels = c("Hand sample", "3G-ESP"))+
+  scale_fill_manual(values = Hand_ESP_22, labels = c("Hand sample", "3G-ESP"))+
+  geom_text_repel(aes(label=mate_label), force = 18)+
+  xlab(print(label.PC1_22))+
+  ylab(print(label.PC2_22))+
+  theme(panel.background = element_rect(fill = "white",size = 1),
+        panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+        axis.title = element_text(size = 20),
+        axis.text = element_blank(),
+        axis.ticks.length=unit(0.25, "cm"),
+        axis.ticks=element_blank(),
+        plot.margin = margin(0.25, 0.25, 0.25, 0.25, "cm"),
+        axis.line.x.bottom = element_line(color = "black", size = 1),
+        axis.line.y.left = element_line(color = "black", size = 1),
+        legend.position = "bottom")+
+  ylim(min(pca_data_22$PC2)-abs(max(pca_data_22$PC2)-min(pca_data_22$PC2))/30, max(pca_data_22$PC2)+abs(max(pca_data_22$PC2)-min(pca_data_22$PC2))/12)
+
+Hand_ESP_16S_PCA_22 <- Hand_ESP_16S_PCA_22+ 
+  theme(plot.title = element_text(size = 25))
+
+ggsave(Hand_ESP_16S_PCA_22, height = 7, width = 7, filename = "DEICODE/Amplicon/PCA_plot_16S_22.pdf", device = "pdf")
+```
+
+```{r Beta Diversity - 5.0um 16S pairs - prep data}
+#Prune to only direct comparison 5.0um samples
+WLE_3GESP19_16S_phyloseq_pairs_50 <- prune_samples(sample_data(WLE_3GESP19_16S_phyloseq_pairs)$sample_type %in% c("Archive 5.0um") | sample_data(WLE_3GESP19_16S_phyloseq_pairs)$sample_type %in% c("Hand-sample 5.0um"), WLE_3GESP19_16S_phyloseq_pairs)
+
+# Prep data for DEICODE (5.0um)
+WLE_3GESP19_16S_asv_table_50 <- as.data.frame(as(otu_table(WLE_3GESP19_16S_phyloseq_pairs_50),"matrix"))
+WLE_3GESP19_16S_asv_table_50 <- tibble::rownames_to_column(WLE_3GESP19_16S_asv_table_50,"#OTUID")
+write.table(WLE_3GESP19_16S_asv_table_50, file="DEICODE/Amplicon/WLE_3GESP19_16S_asv_table_for_biom_50.txt", sep = "\t", row.names = FALSE, quote = FALSE)
+WLE_3GESP19_16S_tax_table_50 <- as.data.frame(as(tax_table(WLE_3GESP19_16S_phyloseq_pairs_50),"matrix"))
+WLE_3GESP19_16S_tax_table_50 <- tibble::rownames_to_column(WLE_3GESP19_16S_tax_table_50,"#OTUID")
+write.table(WLE_3GESP19_16S_tax_table_50, file="DEICODE/Amplicon/WLE_3GESP19_16S_tax_table_for_biom_50.txt", sep = "\t", row.names = FALSE, quote = FALSE)
+WLE_3GESP19_16S_envtsamples_metadata_50 <- as.data.frame(as.matrix(sample_data(WLE_3GESP19_16S_phyloseq_pairs_50)))
+WLE_3GESP19_16S_envtsamples_metadata_50 <- tibble::rownames_to_column(WLE_3GESP19_16S_envtsamples_metadata_50,"#SampleID")
+# Add metadata for filter size
+WLE_3GESP19_16S_envtsamples_metadata_50$filter_size = str_sub(WLE_3GESP19_16S_envtsamples_metadata_50$"#SampleID",-2) 
+
+# What do we want to look at in PERMANOVA and PCA?  Sampling method: Hand sampling or 3G-ESP (5.0um)
+write.table(WLE_3GESP19_16S_envtsamples_metadata_50, file="DEICODE/Amplicon/WLE_3GESP19_16S_sample_data_for_biom_50.txt" ,sep = "\t", row.names = FALSE, quote = FALSE)
+```
+```{bash run DEICODE 5.0um 16S pairs, engine.opts = '-l', eval = FALSE}
+conda activate qiime2-2021.2
+
+biom convert -i DEICODE/Amplicon/WLE_3GESP19_16S_asv_table_for_biom_50.txt \
+             -o DEICODE/Amplicon/table_from_txt_json_50.biom \
+              --table-type="OTU table" --to-json
+
+# add metadata files to biom file (5.0um)
+biom add-metadata -i DEICODE/Amplicon/table_from_txt_json_50.biom \
+                  -o DEICODE/Amplicon/table_50_w_md.biom \
+                  --observation-metadata-fp DEICODE/Amplicon/WLE_3GESP19_16S_tax_table_for_biom_50.txt \
+                  --sample-metadata-fp DEICODE/Amplicon/WLE_3GESP19_16S_sample_data_for_biom_50.txt
+
+# import into qiime2 (5.0um)
+qiime tools import \
+--input-path DEICODE/Amplicon/table_50_w_md.biom \
+--output-path DEICODE/Amplicon/WLE_3GESP19_16S_50.biom.qza \
+--type FeatureTable[Frequency]
+
+# run DEICODE (default settings) (5.0um)
+qiime deicode rpca \
+--i-table DEICODE/Amplicon/WLE_3GESP19_16S_50.biom.qza \
+--p-n-components 3 \
+--p-min-feature-count 10 \
+--p-min-sample-count 500 \
+--o-biplot DEICODE/Amplicon/ordination_50.qza \
+--o-distance-matrix DEICODE/Amplicon/distance_50.qza 
+
+# Run PERMANOVA (gets statistical signficance for distances) (5.0um)
+qiime diversity beta-group-significance \
+--i-distance-matrix DEICODE/Amplicon/distance_50.qza \
+--m-metadata-file DEICODE/Amplicon/WLE_3GESP19_16S_sample_data_for_biom_50.txt \
+--m-metadata-column sample_type \
+--p-method permanova \
+--o-visualization DEICODE/Amplicon/WLE_3GESP19_16S_PERMANOVA_50.qzv 
+```
+```{r Beta Diversity - 5.0um 16S pairs - PERMANOVA/Plot}
+# Extract metadata (5.0um)
+pca_metadata_50 <- WLE_3GESP19_16S_envtsamples_metadata_50
+pca_metadata_50 %>% dplyr::rename(., "SampleID" = "#SampleID") -> pca_metadata_50
+
+## Load 16S Data (5.0um)
+distance_50 <- read_qza(file = "DEICODE/Amplicon/distance_50.qza")
+
+# Extract distance matrix (5.0um)
+distance_matrix_50 <- distance_50$data
+
+# convert DEICODE matrix to "dist" class object (5.0um)
+PCA_dist_50 <- as.dist(distance_matrix_50)
+
+# PERMANOVA for Hand vs. 3G-ESP (5.0um)
+Hand_3GESP_permanova_16S_50 <- adonis2(PCA_dist_50 ~ description, data = pca_metadata_50, permutations=999) 
+Hand_3GESP_permanova_16S_50
+#Permutation test for adonis under reduced model
+#Terms added sequentially (first to last)
+#Permutation: free
+#Number of permutations: 999
+
+#adonis2(formula = PCA_dist_50 ~ description, data = pca_metadata_50, permutations = 999)
+#Df SumOfSqs      R2     F Pr(>F)  
+#description  1    5.368 0.13395 2.784  0.076 .
+#Residual    18   34.706 0.86605               
+#Total       19   40.074 1.00000                
+#---
+#  Signif. codes:  0 ‘***’ 0.001 ‘**’ 0.01 ‘*’ 0.05 ‘.’ 0.1 ‘ ’ 1  
+
+pco_50 <- read_qza(file = "DEICODE/Amplicon/ordination_50.qza") 
+label.PC1_50 <- paste0("PC1 (", round(pco_50$data$ProportionExplained$PC1, 3)*100,"%)")
+label.PC1_50
+label.PC2_50 <- paste0("PC2 (", round(pco_50$data$ProportionExplained$PC2, 3)*100,"%)")
+label.PC2_50
+label.PC3_50 <- paste0("PC3 (", round(pco_50$data$ProportionExplained$PC3, 3)*100,"%)")
+label.PC3_50
+
+## Prepare PCA data for ggplot (5.0um)
+pca_metadata_50 <- WLE_3GESP19_16S_envtsamples_metadata_50
+pca_metadata_50 %>% dplyr::rename(., "SampleID" = "#SampleID") -> pca_metadata_50
+pca_metadata_50 %>% dplyr::rename(., "Sampling Method" = "description") -> pca_metadata_50
+pca_metadata_50 %>% dplyr::rename(., "Filter Fraction" = "filter_size") -> pca_metadata_50
+pca_data_50 <- pco_50$data$Vectors
+pca_data_50 <- right_join(pca_data_50,pca_metadata_50,on = "SampleID")
+pca_data_50 <- subset(pca_data_50, !(is.na(pca_data_50$PC1)))
+
+Hand_ESP_50 <- c("Lake Erie hand sample" = "#ff7f00", "Lake Erie sample" = "#1f78b4")
+Filter_size_shape <- c("22" = 21, "50" = 24)
+##----Make plot-----------------------------------------------------------------
+Hand_ESP_16S_PCA_50 <- ggplot(pca_data_50,aes(x=PC1,y=PC2, color = `Sampling Method`, fill = `Sampling Method`, shape = `Filter Fraction`))+
+  geom_point(size = 5, stroke = 2)+
+  scale_shape_manual(values = c(24), labels = c("5.0µm"))+
+  scale_color_manual(values = Hand_ESP_50, labels = c("Hand sample", "3G-ESP"))+
+  scale_fill_manual(values = Hand_ESP_50, labels = c("Hand sample", "3G-ESP"))+
+  geom_text_repel(aes(label=mate_label), force = 18)+
+  xlab(print(label.PC1_50))+
+  ylab(print(label.PC2_50))+
+  theme(panel.background = element_rect(fill = "white",size = 1),
+        panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+        axis.title = element_text(size = 20),
+        axis.text = element_blank(),
+        axis.ticks.length=unit(0.25, "cm"),
+        axis.ticks=element_blank(),
+        plot.margin = margin(0.25, 0.25, 0.25, 0.25, "cm"),
+        axis.line.x.bottom = element_line(color = "black", size = 1),
+        axis.line.y.left = element_line(color = "black", size = 1),
+        legend.position = "bottom") +
+  ylim(min(pca_data_50$PC2)-abs(max(pca_data_50$PC2)-min(pca_data_50$PC2))/30, max(pca_data_50$PC2)+abs(max(pca_data_50$PC2)-min(pca_data_50$PC2))/12)
+
+Hand_ESP_16S_PCA_50 <- Hand_ESP_16S_PCA_50+ 
+  theme(plot.title = element_text(size = 25))
+  
+ggsave(Hand_ESP_16S_PCA_50, height = 7, width = 7, filename = "DEICODE/Amplicon/PCA_plot_16S_50.pdf", device = "pdf")
+
+```
+
+```{r Beta Diversity - All metagenomic pairs}
+# Extract metadata for mates, prep formatting
+sample_info_table <- read.table("metadata_2019.tsv",  sep ='\t', header = TRUE,
+                                row.names = 1, na.strings = c("", "NA"))
+
+# Read/import metadata file and exclude samples that don't have a "mate_label" - this the same as selecting mate labels A-J in the 16S pipeline
+WLE_3GESP19_metagenomics_mates_all <- sample_info_table %>% filter(!is.na(mate_label))
+# Add new column, simplifying metagenomic sequencing IDs
+WLE_3GESP19_metagenomics_mates_all <- WLE_3GESP19_metagenomics_mates_all %>% add_column(sample_id_shotgun_short = gsub("_........-........", "", WLE_3GESP19_metagenomics_mates_all$sample_id_shotgun))
+
+WLE_3GESP19_metagenomics_mates_all <- tibble::rownames_to_column(WLE_3GESP19_metagenomics_mates_all,"sample_name")
+
+# Add metadata for filter size
+WLE_3GESP19_metagenomics_mates_all$filter_size = str_sub(WLE_3GESP19_metagenomics_mates_all$"sample_name",-2) 
+
+bracken_biplot_all <- read.csv("Bracken_species_counts/bracken_species_counts_2019_biplot_all.csv",  header = TRUE,
+                           row.names = 1, na.strings = c("", "NA"))
+bracken_biplot_all <- rownames_to_column(bracken_biplot_all, "sample_id_shotgun_short")
+names(bracken_biplot_all)[2] <- "PC1"
+names(bracken_biplot_all)[3] <- "PC2"
+bracken_biplot_all_comb <- left_join(WLE_3GESP19_metagenomics_mates_all, bracken_biplot_all, by = "sample_id_shotgun_short") 
+
+bracken_biplot_all_comb %>% dplyr::rename(., "Filter Fraction" = "filter_size") -> bracken_biplot_all_comb
+bracken_biplot_all_comb %>% dplyr::rename(., "Sampling Method" = "description") -> bracken_biplot_all_comb
+
+distance_metagenomic_all <- read_qza(file = "Bracken_species_counts/bracken_species_counts_2019_dist_all.qza")
+
+# Extract distance matrix
+distance_matrix_metagenomic_all <- distance_metagenomic_all$data
+
+# Convert DEICODE matrix to "dist" class object
+PCA_dist_metagenomic_all <- as.dist(distance_matrix_metagenomic_all)
+
+# PERMANOVA for Hand vs. 3G-ESP
+Hand_3GESP_permanova_metagenomic_all <- adonis2(PCA_dist_metagenomic_all ~ description, data = WLE_3GESP19_metagenomics_mates_all, permutations=999) 
+Hand_3GESP_permanova_metagenomic_all
+#Permutation test for adonis under reduced model
+#Terms added sequentially (first to last)
+#Permutation: free
+#Number of permutations: 999
+#adonis2(formula = PCA_dist_metagenomic_all ~ description, data = WLE_3GESP19_metagenomics_mates_all, permutations = 999)
+#Df SumOfSqs      R2      F Pr(>F)
+#description  1    0.068 0.00168 0.0638  0.795
+#Residual    38   40.453 0.99832              
+#Total       39   40.521 1.00000 
+
+# PERMANOVA for Hand vs. 3G-ESP
+Hand_3GESP_permanova_metagenomic_all <- adonis2(PCA_dist_metagenomic_all ~ filter_size, data = WLE_3GESP19_metagenomics_mates_all, permutations=999) 
+Hand_3GESP_permanova_metagenomic_all
+#Permutation test for adonis under reduced model
+#Terms added sequentially (first to last)
+#Permutation: free
+#Number of permutations: 999
+#adonis2(formula = PCA_dist_metagenomic_all ~ description, data = WLE_3GESP19_metagenomics_mates_all, permutations = 999)
+#adonis2(formula = PCA_dist_metagenomic_all ~ filter_size, data = WLE_3GESP19_metagenomics_mates_all, permutations = 999)
+#Df SumOfSqs      R2      F Pr(>F)    
+#filter_size  1   19.608 0.48389 35.628  0.001 ***
+#  Residual    38   20.913 0.51611                  
+#Total       39   40.521 1.00000                  
+
+# PERMANOVA for Hand vs. 3G-ESP
+Hand_3GESP_permanova_metagenomic_all <- adonis2(PCA_dist_metagenomic_all ~ description + filter_size, data = WLE_3GESP19_metagenomics_mates_all, permutations=999) 
+Hand_3GESP_permanova_metagenomic_all
+#adonis2(formula = PCA_dist_metagenomic_all ~ description + filter_size, data = WLE_3GESP19_metagenomics_mates_all, permutations = 999)
+#Df SumOfSqs      R2       F Pr(>F)    
+#description  1    0.068 0.00168  0.1206  0.728    
+#filter_size  1   19.608 0.48389 34.8036  0.001 ***
+#  Residual    37   20.845 0.51443                   
+#Total       39   40.521 1.00000  
+
+Hand_ESP <- c("Lake Erie hand sample" = "#ff7f00", "Lake Erie sample" = "#1f78b4")
+Filter_size_shape <- c("22" = 21, "50" = 24)
+##----Make plot----------------------------------------------------------------- 
+Hand_ESP_Shotgun_PCA_all <- ggplot(bracken_biplot_all_comb,aes(x=PC1,y=PC2,color = `Sampling Method`, fill = `Sampling Method`, shape = `Filter Fraction`))+
+  geom_point(size = 5, stroke = 2)+
+  scale_color_manual(values = Hand_ESP, labels = c("Hand sample", "3G-ESP"))+
+  scale_fill_manual(values = Hand_ESP, labels = c("Hand sample", "3G-ESP"))+
+  scale_shape_manual(values = Filter_size_shape, labels = c("0.22µm", "5.0µm"))+
+  geom_text_repel(aes(label=mate_label), force = 18)+
+  xlab("PC1 (95.7%)")+ 
+  ylab("PC2 (4.3%)") +
+  theme(panel.background = element_rect(fill = "white",size = 1),
+        panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+        axis.title = element_text(size = 20),
+        axis.text = element_blank(),
+        axis.ticks.length=unit(0.25, "cm"),
+        axis.ticks=element_blank(),
+        plot.margin = margin(0.25, 0.25, 0.25, 0.25, "cm"),
+        axis.line.x.bottom = element_line(color = "black", size = 1),
+        axis.line.y.left = element_line(color = "black", size = 1),
+        legend.position = "bottom") +
+  ylim(min(bracken_biplot_all_comb$PC2)-abs(max(bracken_biplot_all_comb$PC2)-min(bracken_biplot_all_comb$PC2))/30, max(bracken_biplot_all_comb$PC2)+abs(max(bracken_biplot_all_comb$PC2)-min(bracken_biplot_all_comb$PC2))/12)
+  
+ggsave(Hand_ESP_Shotgun_PCA_all, height = 7, width = 7, filename = "DEICODE/Metagenomic/PCA_plot_metagenomic_all.pdf", device = "pdf")
+```
+```{r Beta Diversity - 5.0um metagenomic pairs}
+# Extract metadata for mates, prep formatting
+sample_info_table <- read.table("metadata_2019.tsv",  sep ='\t', header = TRUE,
+                                row.names = 1, na.strings = c("", "NA"))
+
+# Read/import metadata file and exclude samples that don't have a "mate_label" - this the same as selecting mate labels A-J in the 16S pipeline
+WLE_3GESP19_metagenomics_mates_all <- sample_info_table %>% filter(!is.na(mate_label))
+WLE_3GESP19_metagenomics_mates_all <- WLE_3GESP19_metagenomics_mates_all %>% add_column(sample_id_shotgun_short = gsub("_........-........", "", WLE_3GESP19_metagenomics_mates_all$sample_id_shotgun))
+WLE_3GESP19_metagenomics_mates_50 <- subset(WLE_3GESP19_metagenomics_mates_all, sample_type == "Archive 5.0um" | sample_type == "Hand-sample 5.0um")
+
+bracken_biplot_50 <- read.csv("Bracken_species_counts/bracken_species_counts_2019_biplot_50.csv",  header = TRUE,
+                           row.names = 1, na.strings = c("", "NA"))
+bracken_biplot_50 <- rownames_to_column(bracken_biplot_50, "sample_id_shotgun_short")
+names(bracken_biplot_50)[2] <- "PC1"
+names(bracken_biplot_50)[3] <- "PC2"
+bracken_biplot_comb_50 <- left_join(WLE_3GESP19_metagenomics_mates_50, bracken_biplot_50, by = "sample_id_shotgun_short") 
+bracken_biplot_comb_50 %>% dplyr::rename(., "Sampling Method" = "description") -> bracken_biplot_comb_50
+
+## Load metagenomic data
+distance_metagenomic_50 <- read_qza(file = "Bracken_species_counts/bracken_species_counts_2019_dist_50.qza")
+# Extract distance matrix
+distance_matrix_metagenomic_50 <- distance_metagenomic_50$data
+
+# convert DEICODE matrix to "dist" class object
+PCA_dist_metagenomic_50 <- as.dist(distance_matrix_metagenomic_50)
+
+# PERMANOVA for Hand vs. 3G-ESP
+Hand_3GESP_permanova_metagenomic_50 <- adonis2(PCA_dist_metagenomic_50 ~ description, data = WLE_3GESP19_metagenomics_mates_50, permutations=999) 
+Hand_3GESP_permanova_metagenomic_50
+#Permutation test for adonis under reduced model
+#Terms added sequentially (first to last)
+#Permutation: free
+#Number of permutations: 999
+#adonis2(formula = PCA_dist_metagenomic_50 ~ description, data = WLE_3GESP19_metagenomics_mates_50, permutations = 999)
+#             Df      SumOfSqs            R2          F      Pr(>F)
+#description   1         0.003       0.00015     0.0027       0.961
+#Residual     18        20.218       0.99985              
+#Total        19        20.221       1.00000  
+
+Hand_ESP <- c("Lake Erie hand sample" = "#ff7f00", "Lake Erie sample" = "#1f78b4")
+# Make plot
+Hand_ESP_Shotgun_PCA_50 <- ggplot(bracken_biplot_comb_50,aes(x=PC1,y=PC2,color = `Sampling Method`, fill = `Sampling Method`))+
+  geom_point(size = 5, stroke = 2, shape = 24)+
+  scale_shape_manual(values = c(24), labels = c("5.0µm"))+
+  scale_color_manual(values = Hand_ESP, labels = c("Hand sample", "3G-ESP"))+
+  scale_fill_manual(values = Hand_ESP, labels = c("Hand sample", "3G-ESP"))+
+  geom_text_repel(aes(label=mate_label), force = 18)+
+  xlab("PC1 (88.8%)")+ 
+  ylab("PC2 (11.2%)") +
+  theme(panel.background = element_rect(fill = "white",size = 1),
+        panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+        axis.title = element_text(size = 20),
+        axis.text = element_blank(),
+        axis.ticks.length=unit(0.25, "cm"),
+        axis.ticks=element_blank(),
+        plot.margin = margin(0.25, 0.25, 0.25, 0.25, "cm"),
+        axis.line.x.bottom = element_line(color = "black", size = 1),
+        axis.line.y.left = element_line(color = "black", size = 1),
+        legend.position = "bottom") +
+  ylim(min(bracken_biplot_comb_50$PC2)-abs(max(bracken_biplot_comb_50$PC2)-min(bracken_biplot_comb_50$PC2))/30, max(bracken_biplot_comb_50$PC2)+abs(max(bracken_biplot_comb_50$PC2)-min(bracken_biplot_comb_50$PC2))/12)
+
+ggsave(Hand_ESP_Shotgun_PCA_50, height = 7, width = 7, filename = "DEICODE/Metagenomic/PCA_plot_metagenomic_50.pdf", device = "pdf")
+```
+```{r Beta Diversity - 0.22um metagenomic pairs}
+# Extract metadata for mates, prep formatting
+sample_info_table <- read.table("metadata_2019.tsv",  sep ='\t', header = TRUE,
+                                row.names = 1, na.strings = c("", "NA"))
+
+# Read/import metadata file and exclude samples that don't have a "mate_label" - this the same as selecting mate labels A-J in the 16S pipeline
+WLE_3GESP19_metagenomics_mates_all <- sample_info_table %>% filter(!is.na(mate_label))
+WLE_3GESP19_metagenomics_mates_all <- WLE_3GESP19_metagenomics_mates_all %>% add_column(sample_id_shotgun_short = gsub("_........-........", "", WLE_3GESP19_metagenomics_mates_all$sample_id_shotgun))
+WLE_3GESP19_metagenomics_mates_22 <- subset(WLE_3GESP19_metagenomics_mates_all, sample_type == "Archive 0.22um" | sample_type == "Hand-sample 0.22um")
+
+bracken_biplot_22 <- read.csv("Bracken_species_counts/bracken_species_counts_2019_biplot_22.csv",  header = TRUE,
+                           row.names = 1, na.strings = c("", "NA"))
+bracken_biplot_22 <- rownames_to_column(bracken_biplot_22, "sample_id_shotgun_short")
+names(bracken_biplot_22)[2] <- "PC1"
+names(bracken_biplot_22)[3] <- "PC2"
+bracken_biplot_comb_22 <- left_join(WLE_3GESP19_metagenomics_mates_22, bracken_biplot_22, by = "sample_id_shotgun_short") 
+bracken_biplot_comb_22 %>% dplyr::rename(., "Sampling Method" = "description") -> bracken_biplot_comb_22
+
+# Load metagenomic data
+distance_metagenomic_22 <- read_qza(file = "Bracken_species_counts/bracken_species_counts_2019_dist_22.qza")
+# Extract distance matrix
+distance_matrix_metagenomic_22 <- distance_metagenomic_22$data
+
+# convert DEICODE matrix to "dist" class object
+PCA_dist_metagenomic_22 <- as.dist(distance_matrix_metagenomic_22)
+
+# PERMANOVA for Hand vs. 3G-ESP
+Hand_3GESP_permanova_metagenomic_22 <- adonis2(PCA_dist_metagenomic_22 ~ description, data = WLE_3GESP19_metagenomics_mates_22, permutations=999) 
+Hand_3GESP_permanova_metagenomic_22
+#Permutation test for adonis under reduced model
+#Terms added sequentially (first to last)
+#Permutation: free
+#Number of permutations: 999
+#adonis2(formula = PCA_dist_metagenomic_22 ~ description, data = WLE_3GESP19_metagenomics_mates_22, permutations = 999)
+#Df SumOfSqs      R2      F Pr(>F)
+#description  1   0.1274 0.00632 0.1146  0.765
+#Residual    18  20.0224 0.99368              
+#Total       19  20.1499 1.00000 
+
+Hand_ESP <- c("Lake Erie hand sample" = "#ff7f00", "Lake Erie sample" = "#1f78b4")
+# Make plot
+Hand_ESP_Shotgun_PCA_22 <- ggplot(bracken_biplot_comb_22,aes(x=PC1,y=PC2,color = `Sampling Method`, fill = `Sampling Method`))+
+  geom_point(size = 5, stroke = 2, shape = 21)+
+  scale_shape_manual(values = c(24), labels = c("5.0µm"))+
+  scale_color_manual(values = Hand_ESP, labels = c("Hand sample", "3G-ESP"))+
+  scale_fill_manual(values = Hand_ESP, labels = c("Hand sample", "3G-ESP"))+
+  geom_text_repel(aes(label=mate_label), force = 18)+
+  xlab("PC1 (98.5%)")+ 
+  ylab("PC2 (1.5%)") +
+  theme(panel.background = element_rect(fill = "white",size = 1),
+        panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+        axis.title = element_text(size = 20),
+        axis.text = element_blank(),
+        axis.ticks.length=unit(0.25, "cm"),
+        axis.ticks=element_blank(),
+        plot.margin = margin(0.25, 0.25, 0.25, 0.25, "cm"),
+        axis.line.x.bottom = element_line(color = "black", size = 1),
+        axis.line.y.left = element_line(color = "black", size = 1),
+        legend.position = "bottom") +
+  ylim(min(bracken_biplot_comb_22$PC2)-abs(max(bracken_biplot_comb_22$PC2)-min(bracken_biplot_comb_22$PC2))/30, max(bracken_biplot_comb_22$PC2)+abs(max(bracken_biplot_comb_22$PC2)-min(bracken_biplot_comb_22$PC2))/12)
+
+ggsave(Hand_ESP_Shotgun_PCA_22, height = 7, width = 7, filename = "DEICODE/Metagenomic/PCA_plot_metagenomic_22.pdf", device = "pdf")
+```
